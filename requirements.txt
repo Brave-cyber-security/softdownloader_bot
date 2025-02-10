@@ -1,0 +1,7 @@
+# requirements.txt fayli
+python-telegram-bot==20.7
+yt-dlp==2023.12.30
+pydub==0.25.1
+moviepy==1.0.3
+shazamio==0.4.0
+instaloader==4.10.1
