@@ -669,7 +669,6 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             "Qaytadan urinib ko'ring"
         )
         return ADDING_CHANNEL
-
 async def remove_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Kanal o'chirish"""
     if not is_admin(update):
@@ -681,15 +680,15 @@ async def remove_channel_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Kanallar ro'yxati bo'sh!")
         return
     
-    # Kanallar ro'yxatini tugmalar bilan ko'rsatish
     keyboard = []
     for channel in channels:
         keyboard.append([
             InlineKeyboardButton(
-                f"❌ {channel['channel_name']} ({channel['channel_id']})", 
-                callback_data=f"del_{channel['channel_id']}"
+                f"❌ {channel['channel_name']} ({channel['channel_id']})",
+                callback_data=f"remove_channel_{channel['channel_id']}"
             )
         ])
+    keyboard.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admin_back")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -716,38 +715,51 @@ async def show_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await update.message.reply_text(channels_text)
 async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Kanallar bilan bog'liq callback query larni qayta ishlash"""
+    """Kanallar callback query larini qayta ishlash"""
     query = update.callback_query
     await query.answer()
     
-    if query.data == "add_channel":
-        await add_channel_command(update, context)
-    elif query.data == "remove_channel":
-        await remove_channel_command(update, context)
-    elif query.data == "refresh_channels":
-        await show_channels(update, context)
-async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Kanal callback query larini qayta ishlash"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data.startswith('del_'):
-        channel_id = query.data.replace('del_', '')
+    if query.data.startswith('remove_channel_'):
+        channel_id = query.data.replace('remove_channel_', '')
         
-        if db.remove_channel(channel_id):
-            # Yangilangan kanallar ro'yxatini ko'rsatish
-            channels = db.get_channels()
-            if channels:
-                channels_text = "✅ Kanal o'chirildi!\n\n📢 Yangilangan kanallar ro'yxati:\n\n"
-                for i, channel in enumerate(channels, 1):
-                    channels_text += f"{i}. {channel['channel_name']}\n"
-                    channels_text += f"└ {channel['channel_id']}\n\n"
+        try:
+            # Kanalni bazadan o'chirish
+            if db.remove_channel(channel_id):
+                # Yangilangan ro'yxatni ko'rsatish
+                channels = db.get_channels()
+                if channels:
+                    text = "✅ Kanal o'chirildi!\n\n📢 Yangilangan ro'yxat:\n\n"
+                    for i, ch in enumerate(channels, 1):
+                        text += f"{i}. {ch['channel_name']}\n"
+                        text += f"└ {ch['channel_id']}\n\n"
+                else:
+                    text = "✅ Kanal o'chirildi!\n\n❌ Boshqa kanallar yo'q."
+                
+                # Admin klaviaturasini qayta ko'rsatish
+                await query.message.edit_text(
+                    text,
+                    reply_markup=get_admin_keyboard()
+                )
             else:
-                channels_text = "✅ Kanal o'chirildi!\n\n❌ Boshqa kanallar yo'q."
+                await query.message.edit_text(
+                    "❌ Kanalni o'chirishda xatolik yuz berdi!",
+                    reply_markup=get_admin_keyboard()
+                )
+                
+        except Exception as e:
+            logger.error(f"Kanal o'chirishda xato: {str(e)}")
+            await query.message.edit_text(
+                "❌ Xatolik yuz berdi!\n"
+                "Qaytadan urinib ko'ring.",
+                reply_markup=get_admin_keyboard()
+            )
             
-            await query.message.edit_text(channels_text)
-        else:
-            await query.message.edit_text("❌ Kanalni o'chirishda xatolik yuz berdi!")
+    elif query.data == "admin_back":
+        await query.message.edit_text(
+            "🔙 Admin panelga qaytdingiz",
+            reply_markup=get_admin_keyboard()
+        )
+
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Foydalanuvchi kanallarga a'zo bo'lganini tekshirish"""
     user_id = update.effective_user.id
@@ -1242,276 +1254,393 @@ async def download_video(url: str) -> dict:
 
     return None
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """YouTube va Instagram videolarini yuklab olish"""
-    message = await update.message.reply_text("⏳ Video yuklanmoqda...")
-    audio_path = None
-    video_info = None
-    full_song = None
-    original_url = update.message.text.strip()
-    
-    print(f"📥 Olingan URL: {original_url}")
-    
+    """Video va URL larni qayta ishlash"""
+    message = update.message
+    text = message.text if message.text else ""
+
     try:
-        # YouTube videosi bo'lsa
-        if "youtube.com" in original_url or "youtu.be" in original_url:
-            # URL dan video ID ni ajratib olish
-            video_id = extract_video_id(original_url)
+        # YouTube URL uchun alohida ishlov berish
+        if "youtube.com" in text.lower() or "youtu.be" in text.lower():
+            status_message = await message.reply_text("⏳ Video ma'lumotlari yuklanmoqda...")
             
-            print(f"📌 Ajratilgan video ID: {video_id}")
-            
-            if not video_id:
-                await message.edit_text(
-                    "❌ Noto'g'ri YouTube URL.\n"
-                    "Iltimos, to'g'ri linkni yuboring.\n"
-                    "Masalan: https://www.youtube.com/watch?v=VIDEO_ID"
+            # Video sifatlarini olish
+            qualities = await get_youtube_qualities(text)
+            if not qualities:
+                await status_message.edit_text(
+                    "❌ Video ma'lumotlarini olishda xatolik yuz berdi.\n"
+                    "Iltimos, qaytadan urinib ko'ring."
                 )
                 return
-                
-            # Tozalangan URL ni yaratish
-            clean_url = f"https://www.youtube.com/watch?v={video_id}"
-            print(f"🔗 Tozalangan URL: {clean_url}")
+
+            # Sifat tanlash tugmalarini yaratish
+            keyboard = []
+            for quality in qualities:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{quality['format']} - {quality['filesize']}",
+                        callback_data=f"ytq_{message.message_id}_{quality['format_id']}"
+                    )
+                ])
+            keyboard.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_download")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await status_message.edit_text(
+                "📊 Video sifatini tanlang:",
+                reply_markup=reply_markup
+            )
             
-            await message.edit_text("📹 YouTube videolari uchun sifatni tanlang:")
-            await ask_video_quality(update, context, clean_url)
+            # URL ni context ga saqlash
+            context.user_data[f'yt_url_{message.message_id}'] = text
             return
 
-        # Instagram video bo'lsa
-        elif "instagram.com" in original_url:
-            if "/reel/" in original_url or "/p/" in original_url:
-                video_info = await download_video(original_url)
-                
-                if not video_info:
-                    await message.edit_text(
-                        "❌ Video yuklab olishda xatolik yuz berdi.\n"
-                        "Sabablari:\n"
-                        "1. Video mavjud emas\n"
-                        "2. Post yopiq profilda\n"
-                        "3. Link noto'g'ri\n"
-                    )
-                    return
+        # Instagram URL uchun ishlov berish
+        elif "instagram.com" in text.lower():
+            status_message = await message.reply_text("⏳ Instagram video yuklanmoqda...")
+            video_info = await download_instagram_video(text)
 
-                # Video hajmini tekshirish
-                if os.path.exists(video_info['video_path']):
-                    file_size = os.path.getsize(video_info['video_path'])
-                    if file_size > 2000 * 1024 * 1024:  
-                        await message.edit_text(
-                            "⚠️ Video hajmi juda katta (2000MB dan oshiq).\n"
-                            "Telegram botlari 2000MB dan katta fayllarni yubora olmaydi."
-                        )
-                        # Faylni tozalash
-                        cleanup_files(video_info['video_path'])
-                        return
-
-                    # Videoni yuborish
-                    try:
-                        await message.edit_text("📤 Video yuborilmoqda...")
-                        async with aiofiles.open(video_info['video_path'], 'rb') as video_file:
-                            sent_video = await update.message.reply_video(
-                                video=await video_file.read(),
-                                caption=f"📱 Instagram video\n🔗 {original_url}",
-                                supports_streaming=True,
-                                filename=os.path.basename(video_info['video_path']),
-                                read_timeout=60,
-                                write_timeout=60,
-                                connect_timeout=60,
-                            )
-                        # Qo'shiq topish tugmasini qo'shish
-                        video_filename = os.path.basename(video_info['video_path'])
-                        keyboard = [[InlineKeyboardButton(
-                            "🎵 Qo'shiqni to'liq versiyasini topish",
-                            callback_data=f"find_song_{video_filename}"
-                        )]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        
-                        await sent_video.reply_text(
-                            "Videodagi qo'shiqni to'liq versiyasini topishni xohlasangiz, "
-                            "quyidagi tugmani bosing:",
-                            reply_markup=reply_markup
-                        )
-                        
-                        # Muvaffaqiyatli yuklab olingani haqida xabar
-                        await message.delete()
-                        
-                    except Exception as e:
-                        logger.error(f"Video yuborishda xatolik: {str(e)}")
-                        await message.edit_text(
-                            "❌ Video yuborishda xatolik yuz berdi.\n"
-                            "Iltimos, qaytadan urinib ko'ring."
-                        )
-                    finally:
-                        # Faylni tozalash
-                        cleanup_files(video_info['video_path'])
-                else:
-                    await message.edit_text(
-                        "❌ Video fayli topilmadi.\n"
-                        "Iltimos, qaytadan urinib ko'ring."
-                    )
-            else:
-                await message.edit_text(
-                    "❌ Noto'g'ri Instagram link.\n"
-                    "Faqat Reels yoki Post linklar qo'llab-quvvatlanadi."
-                )
-        
-        # TikTok video bo'lsa
-        elif "tiktok.com" in original_url:
-            await message.edit_text(
-                "ℹ️ TikTok videolari hozircha qo'llab-quvvatlanmaydi."
-            )
-            
-        else:
-            await message.edit_text(
-                "❌ Noto'g'ri link formati.\n"
-                "Bot qo'llab-quvvatlaydigan platformalar:\n"
-                "✅ YouTube\n"
-                "✅ Instagram (Reels/Posts)\n"
-            )
-            
-    except Exception as e:
-        error_message = str(e)
-        logger.error(f"Asosiy jarayonda xato: {error_message}")
-        
-        # Foydalanuvchiga tushunarli xato xabarini yuborish
-        if "URL blocked" in error_message:
-            await message.edit_text(
-                "❌ Bu video yuklab olish uchun bloklangan.\n"
-                "Boshqa video linkini yuboring."
-            )
-        elif "Private video" in error_message:
-            await message.edit_text(
-                "❌ Bu yopiq (private) video.\n"
-                "Faqat ochiq videolarni yuklab olish mumkin."
-            )
-        elif "sign URL" in error_message:
-            await message.edit_text(
-                "❌ Video mavjud emas yoki o'chirilgan."
-            )
-        else:
-            await message.edit_text(
-                "❌ Xatolik yuz berdi.\n"
-                "Iltimos, qaytadan urinib ko'ring yoki boshqa link yuboring."
-            )
-    
-    finally:
-        # Vaqtinchalik fayllarni tozalash
-        try:
-            if video_info and 'video_path' in video_info:
-                if os.path.exists(video_info['video_path']):
-                    os.remove(video_info['video_path'])
-            if audio_path and os.path.exists(audio_path):
-                os.remove(audio_path)
-            if full_song and 'audio_path' in full_song:
-                if os.path.exists(full_song['audio_path']):
-                    os.remove(full_song['audio_path'])
-        except Exception as e:
-            logger.error(f"Fayllarni tozalashda xatolik: {str(e)}")
-
-async def find_song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    
-    print("🎵 Qo'shiq topish funksiyasi boshlandi")
-    print(f"👤 Foydalanuvchi: {update.effective_user.id}")
-    
-    try:
-        # Callback data dan video message ID ni olish
-        _, message_id = query.data.split('_')
-        message_id = int(message_id)
-        
-        # Context dan video ma'lumotlarini olish
-        video_data = context.user_data.get(f'video_{message_id}')
-        
-        if not video_data:
-            print("❌ Video ma'lumotlari topilmadi")
-            await query.message.reply_text(
-                "❌ Video ma'lumotlari topilmadi.\n"
-                "Iltimos, videoni qayta yuboring."
-            )
-            return
-            
-        # Status xabarini yuborish
-        status_message = await query.message.reply_text("⏳ Video qayta yuklanmoqda...")
-        
-        try:
-            # Video faylini yuklab olish
-            file = await context.bot.get_file(video_data['file_id'])
-            temp_video_path = os.path.join(DOWNLOADS_DIR, f"temp_video_{int(time.time())}.mp4")
-            
-            await file.download_to_drive(temp_video_path)
-            print(f"📁 Video yuklandi: {temp_video_path}")
-            
-            if not os.path.exists(temp_video_path):
-                raise FileNotFoundError("Video fayli yuklanmadi")
-            
-            await status_message.edit_text("🔍 Qo'shiq aniqlanmoqda...")
-            
-            # Qo'shiqni aniqlash
-            song_info = await recognize_song(temp_video_path)
-            
-            if not song_info:
+            if not video_info or not video_info.get('video_path'):
                 await status_message.edit_text(
-                    "❌ Qo'shiq aniqlanmadi.\n"
+                    "❌ Video yuklab olishda xatolik yuz berdi.\n"
                     "Sabablari:\n"
-                    "1. Video da qo'shiq yo'q\n"
-                    "2. Qo'shiq sifati past\n"
-                    "3. Qo'shiq bazada mavjud emas"
+                    "1. Video mavjud emas\n"
+                    "2. Post yopiq profilda\n"
+                    "3. Link noto'g'ri"
                 )
                 return
+
+        # Telegram video fayl uchun ishlov berish
+        elif message.video:
+            status_message = await message.reply_text("⏳ Video tahlil qilinmoqda...")
+            video_file = await context.bot.get_file(message.video.file_id)
+            video_path = os.path.join(DOWNLOADS_DIR, f"video_{message.video.file_id}.mp4")
             
-            # Qo'shiq haqida ma'lumot
-            song_details = (
-                f"🎵 Qo'shiq topildi!\n\n"
-                f"📌 Nomi: {song_info['title']}\n"
-                f"👤 Ijrochi: {song_info['artist']}\n"
+            await video_file.download_to_drive(video_path)
+            video_info = {'video_path': video_path}
+
+        else:
+            await message.reply_text(
+                "❌ Noto'g'ri format!\n\n"
+                "Quyidagilarni yuborishingiz mumkin:\n"
+                "1. Video fayl\n"
+                "2. Instagram video linki\n"
+                "3. YouTube video linki"
             )
-            
-            if song_info.get('album'):
-                song_details += f"💽 Albom: {song_info['album']}\n"
-            if song_info.get('genre'):
-                song_details += f"🎼 Janr: {song_info['genre']}\n"
-            
-            await status_message.edit_text(f"{song_details}\n⏳ To'liq versiya yuklanmoqda...")
-            
-            # YouTube dan qo'shiqni qidirish va yuklash
-            search_query = f"{song_info['artist']} - {song_info['title']} audio"
-            downloaded_song = await download_song_from_youtube(search_query, DOWNLOADS_DIR)
-            
-            if not downloaded_song:
-                await status_message.edit_text(
-                    f"{song_details}\n❌ Qo'shiqning to'liq versiyasini yuklab olishda xatolik yuz berdi."
+            return
+
+        # Video fayl hajmini tekshirish
+        file_size = os.path.getsize(video_info['video_path'])
+        if file_size > 50 * 1024 * 1024:  # 50MB limit
+            await status_message.edit_text(
+                "⚠️ Video hajmi juda katta (50MB dan oshiq).\n"
+                "Telegram botlari 50MB dan katta fayllarni yubora olmaydi."
+            )
+            return
+
+        # Videoni yuborish
+        await status_message.edit_text("📤 Video yuborilmoqda...")
+        
+        # Video caption
+        if "instagram.com" in text.lower():
+            caption = f"📱 Instagram video\n🔗 {text}"
+        else:
+            caption = "📹 Video"
+
+        async with aiofiles.open(video_info['video_path'], 'rb') as video_file:
+            sent_video = await message.reply_video(
+                video=await video_file.read(),
+                caption=caption,
+                supports_streaming=True
+            )
+
+        # Video ma'lumotlarini saqlash
+        context.user_data[f'video_{sent_video.message_id}'] = {
+            'file_id': sent_video.video.file_id,
+            'message_id': sent_video.message_id,
+            'url': text if text else "Uploaded video",
+            'path': video_info['video_path']
+        }
+
+        # Qo'shiq topish va boshqa imkoniyatlar tugmalari
+        keyboard = []
+        
+        # Asosiy tugma - qo'shiqni topish
+        keyboard.append([
+            InlineKeyboardButton(
+                "🎵 Qo'shiqni topish",
+                callback_data=f"find_song_{sent_video.message_id}"
+            )
+        ])
+        
+        # Instagram va oddiy video uchun MP3 tugmasi
+        if not "youtube.com" in text.lower():
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🎵 MP3 ga o'girish",
+                    callback_data=f"convert_mp3_{sent_video.message_id}"
                 )
-                return
-            
-            # Qo'shiqni yuborish
-            async with aiofiles.open(downloaded_song['audio_path'], 'rb') as audio_file:
-                await query.message.reply_audio(
-                    audio=await audio_file.read(),
-                    caption=f"🎵 {song_info['title']} - {song_info['artist']}\n"
-                           f"🎼 To'liq versiya",
-                    title=song_info['title'][:64],
-                    performer=song_info['artist'][:64],
-                    duration=downloaded_song.get('duration'),
-                    filename=f"{song_info['title'][:32]}.mp3"
-                )
-            await status_message.delete()
-            
-        except Exception as e:
-            print(f"❌ Xatolik: {str(e)}")
+            ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await sent_video.reply_text(
+            "📋 Qo'shimcha imkoniyatlar:",
+            reply_markup=reply_markup
+        )
+        
+        await status_message.delete()
+
+        # Statistikani saqlash
+        user_id = update.effective_user.id
+        file_type = "instagram" if "instagram.com" in text.lower() else "video"
+        db.add_download(
+            user_id=user_id,
+            file_type=file_type,
+            file_name=os.path.basename(video_info['video_path']),
+            file_size=file_size
+        )
+
+    except Exception as e:
+        error_message = f"Video qayta ishlashda xato: {str(e)}"
+        logger.error(error_message)
+        if 'status_message' in locals():
             await status_message.edit_text(
                 "❌ Xatolik yuz berdi.\n"
                 "Iltimos, qaytadan urinib ko'ring."
             )
-        finally:
-            # Fayllarni tozalash
-            cleanup_files(temp_video_path)
-            if 'downloaded_song' in locals() and downloaded_song and 'audio_path' in downloaded_song:
-                cleanup_files(downloaded_song['audio_path'])
+        else:
+            await message.reply_text(
+                "❌ Xatolik yuz berdi.\n"
+                "Iltimos, qaytadan urinib ko'ring."
+            )
+
+    finally:
+        # Vaqtinchalik fayllarni tozalash
+        if 'video_info' in locals() and video_info and video_info.get('video_path'):
+            try:
+                if os.path.exists(video_info['video_path']):
+                    os.remove(video_info['video_path'])
+            except Exception as e:
+                logger.error(f"Faylni o'chirishda xato: {str(e)}")
+
+async def get_youtube_qualities(url: str) -> List[Dict]:
+    """YouTube video sifatlarini olish"""
+    try:
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = []
+            
+            for f in info['formats']:
+                if f.get('ext') == 'mp4' and f.get('filesize'):
+                    format_name = f"{f.get('height', '')}p"
+                    if f.get('filesize'):
+                        size_mb = round(f['filesize'] / (1024 * 1024), 1)
+                        if size_mb <= 50:  # Faqat 50MB dan kichik formatlarni ko'rsatish
+                            formats.append({
+                                'format': format_name,
+                                'format_id': f['format_id'],
+                                'filesize': f"{size_mb}MB"
+                            })
+            
+            return sorted(formats, key=lambda x: int(x['format'].replace('p', '')), reverse=True)
             
     except Exception as e:
-        print(f"❌ Umumiy xatolik: {str(e)}")
-        await query.message.reply_text(
-            "❌ Xatolik yuz berdi.\n"
+        logger.error(f"YouTube sifatlarni olishda xato: {str(e)}")
+        return None
+async def youtube_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """YouTube video sifati tanlanganda"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Callback data ni ajratish
+        _, message_id, format_id = query.data.split('_')
+        url = context.user_data.get(f'yt_url_{message_id}')
+        
+        if not url:
+            await query.message.edit_text("❌ URL topilmadi!")
+            return
+            
+        await query.message.edit_text("⏳ Video yuklanmoqda...")
+        
+        # Videoni yuklash
+        ydl_opts = {
+            'format': format_id,
+            'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s')
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            
+            # Videoni yuborish
+            async with aiofiles.open(video_path, 'rb') as video_file:
+                sent_video = await query.message.reply_video(
+                    video=await video_file.read(),
+                    caption=f"📺 {info['title']}\n🔗 {url}",
+                    supports_streaming=True
+                )
+                
+            # Qo'shimcha tugmalar
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🎵 Qo'shiqni topish",
+                        callback_data=f"find_song_{sent_video.message_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🎵 MP3 yuklab olish",
+                        callback_data=f"download_mp3_{sent_video.message_id}"
+                    )
+                ]
+            ]
+            
+            await sent_video.reply_text(
+                "Qo'shimcha imkoniyatlar:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+            # Faylni o'chirish
+            os.remove(video_path)
+            
+    except Exception as e:
+        logger.error(f"YouTube video yuklashda xato: {str(e)}")
+        await query.message.edit_text(
+            "❌ Video yuklashda xatolik yuz berdi.\n"
             "Iltimos, qaytadan urinib ko'ring."
         )
+
+async def cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Yuklanayotgan videoni bekor qilish
+    await query.message.edit_text("❌ Yuklash bekor qilindi!")
+    
+    # Context dan URL ni o'chirish
+    message_id = query.message.reply_to_message.message_id
+    if f'yt_url_{message_id}' in context.user_data:
+        del context.user_data[f'yt_url_{message_id}']
+
+async def download_instagram_video(url: str) -> dict:
+    """Instagram videoni yuklab olish"""
+    try:
+        L = instaloader.Instaloader(
+            dirname_pattern=DOWNLOADS_DIR,
+            filename_pattern="instagram_video",
+            download_videos=True,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False
+        )
+        
+        post = Post.from_shortcode(L.context, url.split("/")[-2])
+        video_path = os.path.join(DOWNLOADS_DIR, f"instagram_video_{post.shortcode}.mp4")
+        
+        if post.is_video:
+            L.download_post(post, target=DOWNLOADS_DIR)
+            return {'video_path': video_path}
+        else:
+            return None
+            
+    except Exception as e:
+        logger.error(f"Instagram video yuklab olishda xato: {str(e)}")
+        return None
+
+async def download_youtube_video(url: str) -> dict:
+    """YouTube videoni yuklab olish"""
+    try:
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            return {'video_path': video_path}
+            
+    except Exception as e:
+        logger.error(f"YouTube video yuklab olishda xato: {str(e)}")
+        return None
+
+async def find_song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Qo'shiqni topish"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Video ID ni olish
+        _, message_id = query.data.split('_')
+        video_info = context.user_data.get(f'video_{message_id}')
+        
+        if not video_info:
+            await query.message.reply_text("❌ Video ma'lumotlari topilmadi!")
+            return
+            
+        status_message = await query.message.reply_text("🎵 Qo'shiq izlanmoqda...")
+        
+        # Videoni audio ga o'girish
+        video_path = await context.bot.get_file(video_info['file_id'])
+        audio_path = os.path.join(DOWNLOADS_DIR, f"audio_{message_id}.mp3")
+        
+        await video_path.download_to_drive(audio_path)
+        
+        # Shazam orqali qo'shiqni topish
+        song_info = await recognize_song(audio_path)
+        
+        if song_info:
+            # Qo'shiq topildi
+            song_text = (
+                f"🎵 Qo'shiq topildi!\n\n"
+                f"📌 Nomi: {song_info['title']}\n"
+                f"👤 Ijrochi: {song_info['artist']}\n"
+                f"💿 Albom: {song_info.get('album', "Noma'lum")}\n"
+                f"📅 Yil: {song_info.get('year', "Noma'lum")}"
+            )
+            
+            keyboard = [[
+                InlineKeyboardButton(
+                    "🎵 To'liq versiyani topish",
+                    callback_data=f"find_full_{song_info['title']}_{song_info['artist']}"
+                )
+            ]]
+            
+            await status_message.edit_text(
+                song_text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await status_message.edit_text(
+                "❌ Qo'shiq topilmadi.\n"
+                "Sabablari:\n"
+                "1. Video da musiqa yo'q\n"
+                "2. Musiqa juda past\n"
+                "3. Musiqa bazada yo'q"
+            )
+            
+    except Exception as e:
+        logger.error(f"Qo'shiq topishda xato: {str(e)}")
+        await status_message.edit_text(
+            "❌ Qo'shiqni topishda xatolik yuz berdi.\n"
+            "Iltimos, qaytadan urinib ko'ring."
+        )
+    finally:
+        # Fayllarni tozalash
+        try:
+            os.remove(audio_path)
+        except:
+            pass
 async def download_song_from_youtube(search_query: str, output_dir: str) -> Optional[Dict[str, Any]]:
     """YouTube orqali qo'shiqni yuklab olish"""
     try:
@@ -1819,39 +1948,66 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "📝 Barcha foydalanuvchilarga yuboriladigan xabarni kiriting:\n"
-        "Bekor qilish uchun /cancel buyrug'ini yuboring."
+        "📝 Yubormoqchi bo'lgan xabaringizni yuboring:\n\n"
+        "Bekor qilish uchun /cancel"
     )
     return BROADCAST
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Xabarni barcha foydalanuvchilarga yuborish"""
-    message = update.message.text
+    if not is_admin(update):
+        return ConversationHandler.END
+    
+    message = update.message
     users = db.get_all_users()
     
-    progress_msg = await update.message.reply_text("📤 Xabar yuborilmoqda...")
-    success = 0
-    failed = 0
+    if not users:
+        await message.reply_text(
+            "❌ Foydalanuvchilar topilmadi!",
+            reply_markup=get_admin_keyboard()
+        )
+        return ConversationHandler.END
+    
+    progress_msg = await message.reply_text("📤 Xabar yuborilmoqda...")
+    
+    success_count = 0
+    fail_count = 0
     
     for user in users:
         try:
-            await context.bot.send_message(
+            await context.bot.copy_message(
                 chat_id=user['user_id'],
-                text=message,
-                parse_mode='HTML'
+                from_chat_id=message.chat_id,
+                message_id=message.message_id
             )
-            success += 1
+            success_count += 1
         except Exception as e:
-            failed += 1
             logger.error(f"Xabar yuborishda xato {user['user_id']}: {str(e)}")
+            fail_count += 1
+        
+        # Har 10 ta yuborishda progressni yangilash
+        if (success_count + fail_count) % 10 == 0:
+            await progress_msg.edit_text(
+                f"📤 Xabar yuborilmoqda...\n"
+                f"✅ Yuborildi: {success_count}\n"
+                f"❌ Xatolik: {fail_count}\n"
+                f"📊 Progress: {((success_count + fail_count) / len(users)) * 100:.1f}%"
+            )
+    
+    # Yakuniy natija
+    result_text = (
+        "📬 Xabar yuborish yakunlandi!\n\n"
+        f"👥 Jami foydalanuvchilar: {len(users)}\n"
+        f"✅ Muvaffaqiyatli: {success_count}\n"
+        f"❌ Xatolik: {fail_count}"
+    )
     
     await progress_msg.edit_text(
-        f"✅ Xabar yuborish yakunlandi:\n"
-        f"✓ Muvaffaqiyatli: {success}\n"
-        f"❌ Muvaffaqiyatsiz: {failed}"
+        result_text,
+        reply_markup=get_admin_keyboard()
     )
+    
     return ConversationHandler.END
-
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Bot sozlamalari"""
     if not is_admin(update):
@@ -2285,7 +2441,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)]
     )
         # Broadcast handler
-    # Broadcast conversation handler
     broadcast_handler = ConversationHandler(
         entry_points=[
             MessageHandler(
@@ -2303,16 +2458,29 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
-
+    # Video handler
+    app.add_handler(MessageHandler(
+        filters.VIDEO | 
+        filters.Regex(r'(instagram\.com|youtube\.com|youtu\.be)'),
+        process_video
+    ))
+    # Handlerlarni qo'shish
+    app.add_handler(broadcast_handler)
         # Message handler
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(?!/).+'),
         handle_message))
+    app.add_handler(MessageHandler(
+        filters.Regex(r'(youtube\.com|youtu\.be)'),
+        process_video
+    ))
     app.add_handler(admin_handler)
+    app.add_handler(CallbackQueryHandler(youtube_quality_callback, pattern="^ytq_"))
+    app.add_handler(CallbackQueryHandler(cancel_download, pattern="^cancel_download$"))
     app.add_handler(CallbackQueryHandler(find_song_callback, pattern="^find_song_"))
     app.add_handler(CallbackQueryHandler(quality_callback, pattern="^quality_"))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r'^song_'))
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r'^cancel_search$'))
+    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r'^cancel_search$')) 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_and_show_results))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_video))
@@ -2320,6 +2488,7 @@ def main():
 
 
      # Kanallar uchun callback handler
+    app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(remove_channel_|admin_back)"))
     app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(add_channel|remove_channel|refresh_channels)$"))
     # In main() function, add this before adding other handlers:    
     app.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"))
@@ -2344,7 +2513,7 @@ def main():
     app.add_handler(broadcast_handler)
     app.add_handler(add_channel_handler)
     app.add_handler(MessageHandler(filters.Regex("^📊 Statistika$"), show_statistics))
-        # Voice va audio message handler (yangi)
+    # Voice va audio message handler (yangi)
     app.add_handler(MessageHandler(
         filters.VOICE | filters.AUDIO,
         handle_music_recognition
