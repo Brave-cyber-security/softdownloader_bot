@@ -421,16 +421,17 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     
     # Admin ekanligini tekshirish
-    if not (str(user.id) in map(str, Config.ADMIN_ID) or user.username == Config.ADMIN_USERNAME.replace("@", "")):
+    if str(user.id) != str(Config.ADMIN_ID):
         await update.message.reply_text(
             "❌ Bu buyruq faqat admin uchun!\n"
-            f"👤 Admin: {ADMIN_CONTACT}"
+            f"👤 Admin bilan bog'lanish: {ADMIN_CONTACT}"
         )
         return
     
+    # Admin panelga kirish uchun parol so'rash
     await update.message.reply_text(
         "🔐 Admin panelga kirish uchun /parol <parol> ko'rinishida kiriting\n"
-        "Masalan: /parol nimadir"
+        "Masalan: /parol 12345"
     )
 
 async def check_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -438,7 +439,8 @@ async def check_admin_password(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     
     # Admin ekanligini tekshirish
-    if not (str(user.id) in map(str, Config.ADMIN_IDS) or user.username == Config.ADMIN_USERNAME.replace("@", "")):
+    if str(user.id) != str(Config.ADMIN_ID):
+        await update.message.reply_text("❌ Bu buyruq faqat admin uchun!")
         return
     
     # Parolni olish
@@ -447,11 +449,9 @@ async def check_admin_password(update: Update, context: ContextTypes.DEFAULT_TYP
     except:
         entered_password = ""
     
+    # Parolni tekshirish
     if entered_password == Config.ADMIN_PASSWORD:
-        # Admin state ni saqlash
         context.user_data['is_admin'] = True
-        
-        # Admin panelni ochish
         await update.message.reply_text(
             "✅ Admin panelga xush kelibsiz!\n\n"
             "Quyidagi amallardan birini tanlang:",
@@ -2280,12 +2280,7 @@ def main():
     admin_handler = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
         states={
-            ADMIN_AUTH: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, 
-                    admin_auth
-                )
-            ],
+            ADMIN_AUTH: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_auth)]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )

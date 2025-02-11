@@ -9,6 +9,7 @@ class Config:
     # Bot sozlamalari
     BOT_TOKEN = os.getenv('BOT_TOKEN')
     ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
+    ADMIN_IDS = [int(os.getenv('ADMIN_ID', 0))]
     ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
     ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
     # Admin panel sozlamalari
