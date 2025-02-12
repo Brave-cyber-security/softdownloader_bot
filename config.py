@@ -12,6 +12,8 @@ class Config:
     ADMIN_IDS = [int(os.getenv('ADMIN_ID', 0))]
     ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
     ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+    INSTAGRAM_USERNAME = os.getenv('INSTAGRAM_USERNAME')
+    INSTAGRAM_PASSWORD = os.getenv('INSTAGRAM_PASSWORD')
     # Admin panel sozlamalari
     ADMIN_ENABLED = os.getenv('ADMIN_ENABLED', 'true').lower() == 'true'
     ADMIN_COMMAND = os.getenv('ADMIN_COMMAND', 'admin')
