@@ -19,6 +19,7 @@ import aiofiles
 from urllib.parse import urlparse, parse_qs
 import re  
 from config import Config
+from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, error, CallbackQuery, Message
 from telegram.ext import (
@@ -1434,53 +1435,86 @@ async def ask_video_quality(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """Video sifatini tanlash uchun tugmalar"""
     try:
         # Video ma'lumotlarini olish
-        with yt_dlp.YoutubeDL({
+        ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True
-        }) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            
-            # Mavjud formatlarni olish
-            formats = []
-            for f in info.get('formats', []):
-                if f.get('ext') == 'mp4' and f.get('vcodec', 'none') != 'none':
-                    height = f.get('height', 0)
-                    if height in [360, 480, 720, 1080]:
+            'extract_flat': True,
+            'format': 'best',
+            'format_sort': ['res:1080', 'res:720', 'res:480', 'res:360'],
+            'prefer_free_formats': True
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(video_url, download=False)
+                
+                if not info:
+                    raise ValueError("Video ma'lumotlari topilmadi")
+
+                # Formatlarni olish
+                formats = []
+                seen_heights = set()
+                
+                for f in info.get('formats', []):
+                    if (f.get('ext') == 'mp4' and 
+                        f.get('vcodec', 'none') != 'none' and 
+                        f.get('height', 0) in [360, 480, 720, 1080] and
+                        f.get('height') not in seen_heights):
+                        
+                        height = f.get('height', 0)
+                        seen_heights.add(height)
                         formats.append({
                             'height': height,
-                            'format_id': f['format_id']
+                            'format_id': f['format_id'],
+                            'filesize': f.get('filesize', 0)
                         })
 
-        # Formatlarni saralash
-        formats = sorted(formats, key=lambda x: x['height'])
-        
-        # Tugmalar yaratish
-        keyboard = []
-        row = []
-        for fmt in formats:
-            callback_data = f"quality_{video_url}_{fmt['height']}"
-            row.append(InlineKeyboardButton(f"{fmt['height']}p", callback_data=callback_data))
-            
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        
-        if row:
-            keyboard.append(row)
+                if not formats:
+                    raise ValueError("Yuklanadigan formatlar topilmadi")
 
-        keyboard.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_download")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        minutes, seconds = divmod(info.get('duration', 0), 60)
-        await update.message.reply_text(
-            f"📹 {info.get('title')}\n"
-            f"⏱ Davomiyligi: {minutes}:{seconds:02d}\n\n"
-            "📥 Yuklab olish sifatini tanlang:",
-            reply_markup=reply_markup
-        )
-    
+                # Formatlarni saralash
+                formats = sorted(formats, key=lambda x: x['height'], reverse=True)
+                
+                # Tugmalarni yaratish
+                keyboard = []
+                video_id = video_url.split("v=")[1].split("&")[0] if "v=" in video_url else video_url.split("/")[-1]
+                
+                for fmt in formats:
+                    # Fayl hajmini tekshirish (50MB dan kichik bo'lsa)
+                    if fmt.get('filesize', 0) == 0 or fmt.get('filesize', 0) <= 50 * 1024 * 1024:
+                        callback_data = f"quality_{video_id}_{fmt['height']}"
+                        if len(callback_data) > 64:  # Telegram limit
+                            callback_data = f"quality_{video_id[:10]}_{fmt['height']}"
+                        keyboard.append([InlineKeyboardButton(f"📹 {fmt['height']}p", callback_data=callback_data)])
+
+                if not keyboard:
+                    raise ValueError("Yuklash uchun mos formatlar topilmadi")
+
+                keyboard.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_download")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                # Video ma'lumotlari
+                duration = info.get('duration', 0)
+                minutes, seconds = divmod(duration, 60)
+                hours, minutes = divmod(minutes, 60)
+                duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
+                
+                title = info.get('title', 'Noma\'lum')
+                if len(title) > 100:
+                    title = title[:97] + "..."
+
+                await update.message.reply_text(
+                    f"📹 {title}\n"
+                    f"👤 {info.get('uploader', 'Noma\'lum')}\n"
+                    f"⏱ Davomiyligi: {duration_str}\n\n"
+                    "📥 Yuklab olish sifatini tanlang:",
+                    reply_markup=reply_markup
+                )
+
+            except Exception as e:
+                logger.error(f"Video ma'lumotlarini olishda xato: {str(e)}")
+                raise
+
     except Exception as e:
         logger.error(f"Sifat tanlashda xato: {str(e)}")
         await update.message.reply_text(
@@ -1497,7 +1531,7 @@ async def download_video_with_quality(video_url: str, height: int, status_messag
             'no_warnings': True,
             'noplaylist': True,
             'merge_output_format': 'mp4',
-            'max_filesize': 50 * 1024 * 1024  # 50MB limit
+            'max_filesize': 50 * 1024 * 1024  
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1527,14 +1561,21 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     
+    status_message = None
+    video_path = None
+    
     try:
         if query.data == "cancel_download":
             await query.message.edit_text("❌ Yuklash bekor qilindi")
             return
 
         # quality_videoUrl_height
-        _, video_url, height = query.data.split('_', 2)
+        _, video_id, height = query.data.split('_', 2)
         height = int(height)
+
+        # Video URL ni to'g'ri formatda yaratish
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        logger.info(f"Video URL: {video_url}, Height: {height}")
 
         # Progress xabari
         status_message = await query.message.reply_text(
@@ -1542,62 +1583,117 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "⚠️ Bu bir necha daqiqa vaqt olishi mumkin."
         )
 
-        # Videoni yuklash
-        video_info = await download_video_with_quality(video_url, height, status_message)
-        
-        if video_info:
-            try:
-                # Musiqani aniqlash
-                await status_message.edit_text("🎵 Videodagi musiqa aniqlanmoqda...")
-                music_info = await extract_and_identify_music(video_info['path'])
+        try:
+            # Video yuklab olish sozlamalari
+            ydl_opts = {
+                'format': f'bestvideo[height<={height}]+bestaudio/best[height<={height}]',
+                'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True
+            }
 
-                # Caption tayyorlash
-                caption = (
-                    f"📹 {video_info['title']}\n"
-                    f"🎬 Sifat: {height}p\n"
-                    f"⏱ Davomiyligi: {int(video_info['duration']//60)}:{int(video_info['duration']%60):02d}\n"
-                )
+            # Videoni yuklash
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                video_path = os.path.join(DOWNLOADS_DIR, f"{info['title']}.mp4")
 
-                if music_info:
-                    caption += (
-                        f"\n🎵 Aniqlangan musiqa:\n"
-                        f"📌 Nomi: {music_info['title']}\n"
-                        f"👤 Ijrochi: {music_info['artist']}\n"
-                    )
-                    if music_info.get('url'):
-                        caption += f"🔗 Musiqa havolasi: {music_info['url']}"
+                if os.path.exists(video_path):
+                    # Fayl hajmini tekshirish
+                    if os.path.getsize(video_path) > 50 * 1024 * 1024:
+                        os.remove(video_path)
+                        await status_message.edit_text(
+                            "❌ Video hajmi juda katta (50MB dan oshiq).\n"
+                            "Iltimos, pastroq sifatni tanlang."
+                        )
+                        return
 
-                # Videoni yuborish
-                await status_message.edit_text("📤 Video yuborilmoqda...")
-                async with aiofiles.open(video_info['path'], 'rb') as f:
-                    await query.message.reply_video(
-                        video=await f.read(),
-                        caption=caption,
-                        filename=f"{video_info['title']}.mp4",
-                        supports_streaming=True,
-                        duration=video_info['duration']
-                    )
-                
-                await status_message.delete()
+                    try:
+                        # Musiqani aniqlash
+                        await status_message.edit_text("🎵 Videodagi musiqa aniqlanmoqda...")
+                        music_info = await extract_and_identify_music(video_path)
 
-            except Exception as e:
-                logger.error(f"Video yuborishda xato: {str(e)}")
-                await status_message.edit_text(
-                    "❌ Video yuborishda xatolik yuz berdi.\n"
-                    "Iltimos, qaytadan urinib ko'ring."
-                )
-            
-            finally:
-                # Faylni tozalash
-                if os.path.exists(video_info['path']):
-                    os.remove(video_info['path'])
+                        # Caption tayyorlash
+                        duration = info.get('duration', 0)
+                        minutes, seconds = divmod(duration, 60)
+                        hours, minutes = divmod(minutes, 60)
+                        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
+
+                        caption = (
+                            f"📹 {info.get('title', 'Video')}\n"
+                            f"👤 {info.get('uploader', 'Noma\'lum')}\n"
+                            f"🎥 {height}p\n"
+                            f"⏱ Davomiyligi: {duration_str}\n"
+                            f"🔗 {video_url}"
+                        )
+
+                        if music_info:
+                            caption += (
+                                f"\n\n🎵 Aniqlangan musiqa:\n"
+                                f"📌 Nomi: {music_info['title']}\n"
+                                f"👤 Ijrochi: {music_info['artist']}\n"
+                            )
+                            if music_info.get('url'):
+                                caption += f"🔗 Musiqa havolasi: {music_info['url']}"
+
+                        # Videoni yuborish
+                        await status_message.edit_text("📤 Video yuborilmoqda...")
+                        async with aiofiles.open(video_path, 'rb') as f:
+                            video_file = await f.read()
+                            await query.message.reply_video(
+                                video=video_file,
+                                caption=caption,
+                                filename=f"{info['title']}.mp4",
+                                supports_streaming=True,
+                                duration=int(info.get('duration', 0)),
+                                width=info.get('width'),
+                                height=info.get('height')
+                            )
+
+                    except Exception as e:
+                        logger.error(f"Video yuborishda xato: {str(e)}")
+                        raise
+
+                else:
+                    raise FileNotFoundError("Video file not found after download")
+
+        except Exception as e:
+            logger.error(f"Video yuklashda xato: {str(e)}")
+            raise
 
     except Exception as e:
         logger.error(f"Sifat tanlash xatosi: {str(e)}")
-        await query.message.reply_text(
-            "❌ Xatolik yuz berdi.\n"
-            "Iltimos, qaytadan urinib ko'ring."
-        )
+        if status_message:
+            await status_message.edit_text(
+                "❌ Xatolik yuz berdi.\n"
+                "Iltimos, qaytadan urinib ko'ring."
+            )
+
+    finally:
+        # Status xabarni o'chirish
+        try:
+            if status_message:
+                await status_message.delete()
+        except Exception as e:
+            logger.error(f"Status xabarni o'chirishda xato: {str(e)}")
+
+        # Vaqtinchalik fayllarni tozalash
+        try:
+            if video_path and os.path.exists(video_path):
+                os.remove(video_path)
+            
+            # Qo'shimcha fayllarni tozalash
+            for file in os.listdir(DOWNLOADS_DIR):
+                file_path = os.path.join(DOWNLOADS_DIR, file)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    logger.error(f"Faylni o'chirishda xato: {str(e)}")
+        except Exception as e:
+            logger.error(f"Fayllarni tozalashda xato: {str(e)}")
+
 async def download_video(url: str) -> dict:
     """Instagram videosini yuklash"""
     ydl_opts = {
@@ -1642,9 +1738,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
-                    'extract_flat': True,
-                    'format': 'best',
-                    'noplaylist': True
+                    'extract_flat': True
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1658,21 +1752,22 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                             )
                             return
 
-                        # Video URL va ID ni olish
-                        video_url = text
-                        if 'entries' in info:
-                            info = info['entries'][0]
-
                         # Formatlarni olish
+                        seen_heights = set()
                         formats = []
+                        
                         for f in info.get('formats', []):
-                            if f.get('ext') == 'mp4' and f.get('vcodec', 'none') != 'none':
+                            if (f.get('ext') == 'mp4' and 
+                                f.get('vcodec', 'none') != 'none' and 
+                                f.get('height', 0) in [360, 480, 720, 1080] and
+                                f.get('height') not in seen_heights):
+                                
                                 height = f.get('height', 0)
-                                if height in [360, 480, 720, 1080]:
-                                    formats.append({
-                                        'height': height,
-                                        'format_id': f['format_id']
-                                    })
+                                seen_heights.add(height)
+                                formats.append({
+                                    'height': height,
+                                    'format_id': f['format_id']
+                                })
 
                         if not formats:
                             await status_message.edit_text(
@@ -1680,16 +1775,24 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                             )
                             return
 
-                        # Sifat tanlash tugmalari - YANGI DIZAYN
-                        formats = sorted(formats, key=lambda x: x['height'], reverse=True)  # Yuqori sifatdan pastga
+                        # Formatlarni saralash
+                        formats = sorted(formats, key=lambda x: x['height'], reverse=True)
                         keyboard = []
                         
-                        # Har bir formatni alohida qatorga joylashtirish
+                        # Video ID ni olish
+                        video_id = None
+                        if "v=" in text:
+                            video_id = text.split("v=")[1].split("&")[0]
+                        else:
+                            video_id = text.split("/")[-1]
+
+                        # Tugmalarni yaratish
                         for fmt in formats:
-                            callback_data = f"quality_{video_url}_{fmt['height']}"
+                            callback_data = f"quality_{video_id}_{fmt['height']}"
+                            if len(callback_data) > 64:  # Telegram limit
+                                callback_data = f"quality_{video_id[:10]}_{fmt['height']}"
                             keyboard.append([InlineKeyboardButton(f"📹 {fmt['height']}p", callback_data=callback_data)])
-                        
-                        # Bekor qilish tugmasini qo'shamiz
+
                         keyboard.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_download")])
                         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1697,16 +1800,20 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         duration = info.get('duration', 0)
                         minutes, seconds = divmod(duration, 60)
                         hours, minutes = divmod(minutes, 60)
-                        
                         duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
                         
+                        title = info.get('title', 'Noma\'lum')
+                        if len(title) > 100:
+                            title = title[:97] + "..."
+
                         await status_message.edit_text(
-                            f"📹 {info.get('title')}\n"
+                            f"📹 {title}\n"
                             f"👤 {info.get('uploader', 'Noma\'lum')}\n"
                             f"⏱ Davomiyligi: {duration_str}\n\n"
                             "📥 Yuklab olish sifatini tanlang:",
                             reply_markup=reply_markup
                         )
+                        return
 
                     except yt_dlp.utils.DownloadError as e:
                         logger.error(f"YouTube yuklab olish xatosi: {str(e)}")
@@ -1723,140 +1830,232 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     "Iltimos, qayta urinib ko'ring."
                 )
                 return
-
-        # Instagram video uchun
+        # Instagram media uchun
         elif "instagram.com" in text.lower():
-            status_message = await message.reply_text("⏳ Instagram video aniqlanmoqda...")
+            status_message = await message.reply_text("⏳ Instagram media aniqlanmoqda...")
             
             try:
-                # URL dan ID ni olish
-                if '/reel/' in text:
-                    post_id = text.split('/reel/')[1].split('/')[0].split('?')[0]
-                elif '/p/' in text:
-                    post_id = text.split('/p/')[1].split('/')[0].split('?')[0]
-                else:
-                    await status_message.edit_text(
-                        "❌ Noto'g'ri Instagram URL.\n"
-                        "Namuna:\n"
-                        "- https://www.instagram.com/p/XXXXX\n"
-                        "- https://www.instagram.com/reel/XXXXX"
-                    )
-                    return
-
-                await status_message.edit_text("📥 Video yuklanmoqda...")
-
                 # Instaloader sozlamalari
                 L = instaloader.Instaloader(
-                    dirname_pattern=DOWNLOADS_DIR,
-                    filename_pattern=f"instagram_{post_id}",
-                    download_pictures=False,
+                    dirname_pattern=str(DOWNLOADS_DIR),
+                    download_pictures=True,
+                    download_videos=True,
                     download_video_thumbnails=False,
                     download_geotags=False,
                     download_comments=False,
                     save_metadata=False,
-                    post_metadata_txt_pattern=""
+                    post_metadata_txt_pattern="",
+                    max_connection_attempts=5,
+                    request_timeout=30,
+                    fatal_status_codes=[429, 400, 403, 404, 500, 503],
+                    iphone_support=True,
+                    user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
                 )
 
+                # Session bilan ishlash
+                session_path = Path("sessions")
+                session_file = session_path / f"{Config.INSTAGRAM_USERNAME}_instagram.session"
+                session_path.mkdir(exist_ok=True)
+
                 try:
-                    # Post ni olish
-                    post = Post.from_shortcode(L.context, post_id)
-                    
-                    if not post.is_video:
-                        await status_message.edit_text("❌ Bu post video emas!")
-                        return
+                    if session_file.exists():
+                        L.load_session_from_file(Config.INSTAGRAM_USERNAME, str(session_file))
+                        # Session fayl yaroqliligini tekshirish
+                        try:
+                            profile = instaloader.Profile.from_username(L.context, Config.INSTAGRAM_USERNAME)
+                            profile.get_posts()
+                            logger.info("Instagram session is valid")
+                        except:
+                            logger.warning("Invalid session, creating new one")
+                            if session_file.exists():
+                                session_file.unlink()
+                            L.login(Config.INSTAGRAM_USERNAME, Config.INSTAGRAM_PASSWORD)
+                            L.save_session_to_file(str(session_file))
+                    else:
+                        L.login(Config.INSTAGRAM_USERNAME, Config.INSTAGRAM_PASSWORD)
+                        L.save_session_to_file(str(session_file))
+                        logger.info("New Instagram session created")
 
-                    # Videoni yuklash
-                    video_path = os.path.join(DOWNLOADS_DIR, f"instagram_{post_id}.mp4")
-                    L.download_post(post, target=DOWNLOADS_DIR)
+                    await status_message.edit_text("📥 Media aniqlanmoqda...")
 
-                    if not os.path.exists(video_path):
-                        raise FileNotFoundError("Video fayl topilmadi")
-
-                    # Video hajmini tekshirish
-                    if os.path.getsize(video_path) > 50 * 1024 * 1024:
-                        os.remove(video_path)
-                        await status_message.edit_text(
-                            "❌ Video hajmi juda katta (50MB dan oshiq).\n"
-                            "Iltimos, boshqa video tanlang."
-                        )
-                        return
-
-                    # Musiqani aniqlash
-                    music_info = None
-                    try:
-                        await status_message.edit_text("🎵 Videodagi musiqa aniqlanmoqda...")
-                        audio_path = os.path.join(DOWNLOADS_DIR, f"temp_audio_{post_id}.mp3")
+                    # Story uchun
+                    if '/stories/' in text:
+                        try:
+                            username = text.split('/stories/')[1].split('/')[0]
+                            story_id = text.split('/stories/')[1].split('/')[1].split('?')[0]
+                            
+                            await status_message.edit_text("📥 Story yuklanmoqda...")
+                            
+                            profile = instaloader.Profile.from_username(L.context, username)
+                            stories = L.get_stories([profile.userid])
+                            
+                            story_found = False
+                            for story in stories:
+                                for item in story.get_items():
+                                    if str(item.mediaid) == story_id:
+                                        story_found = True
+                                        L.download_storyitem(item, target=DOWNLOADS_DIR)
+                                        
+                                        media_path = None
+                                        if item.is_video:
+                                            media_path = os.path.join(DOWNLOADS_DIR, f"{username}_{story_id}.mp4")
+                                            # Musiqani aniqlash
+                                            try:
+                                                await status_message.edit_text("🎵 Videodagi musiqa aniqlanmoqda...")
+                                                music_info = await extract_and_identify_music(media_path)
+                                                caption = f"📱 Instagram Story\n👤 @{username}"
+                                                if music_info:
+                                                    caption += (
+                                                        f"\n\n🎵 Aniqlangan musiqa:\n"
+                                                        f"📌 Nomi: {music_info['title']}\n"
+                                                        f"👤 Ijrochi: {music_info['artist']}\n"
+                                                    )
+                                                    if music_info.get('url'):
+                                                        caption += f"🔗 Musiqa havolasi: {music_info['url']}"
+                                            except Exception as e:
+                                                logger.error(f"Musiqani aniqlashda xato: {str(e)}")
+                                                caption = f"📱 Instagram Story\n👤 @{username}"
+                                            
+                                            await status_message.edit_text("📤 Story yuborilmoqda...")
+                                            async with aiofiles.open(media_path, 'rb') as f:
+                                                await message.reply_video(
+                                                    video=await f.read(),
+                                                    caption=caption,
+                                                    supports_streaming=True
+                                                )
+                                        else:
+                                            media_path = os.path.join(DOWNLOADS_DIR, f"{username}_{story_id}.jpg")
+                                            async with aiofiles.open(media_path, 'rb') as f:
+                                                await message.reply_photo(
+                                                    photo=await f.read(),
+                                                    caption=f"📱 Instagram Story\n👤 @{username}"
+                                                )
+                                        break
+                                if story_found:
+                                    break
+                            
+                            if not story_found:
+                                await status_message.edit_text(
+                                    "❌ Story topilmadi.\n"
+                                    "Story o'chirilgan yoki mavjud emas."
+                                )
                         
-                        # Audio ni ajratib olish
-                        process = await asyncio.create_subprocess_exec(
-                            'ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame',
-                            '-ab', '128k', '-ar', '44100', '-y', audio_path,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        await process.communicate()
+                        except Exception as e:
+                            logger.error(f"Story yuklashda xato: {str(e)}")
+                            await status_message.edit_text(
+                                "❌ Story yuklab olishda xatolik.\n"
+                                "Story mavjud emas yoki yopiq profilda."
+                            )
+                            return
 
-                        if os.path.exists(audio_path):
-                            shazam = Shazam()
-                            async with aiofiles.open(audio_path, 'rb') as f:
-                                content = await f.read()
-                                result = await shazam.recognize_song(content)
+                    # Post va Reel uchun
+                    elif '/p/' in text or '/reel/' in text:
+                        try:
+                            media_id = text.split('/p/')[1].split('/')[0].split('?')[0] if '/p/' in text else text.split('/reel/')[1].split('/')[0].split('?')[0]
+                            media_type = "Post" if '/p/' in text else "Reel"
+                            
+                            await status_message.edit_text(f"📥 {media_type} yuklanmoqda...")
+                            
+                            post = instaloader.Post.from_shortcode(L.context, media_id)
+                            L.download_post(post, target=DOWNLOADS_DIR)
+                            
+                            # Media faylini aniqlash
+                            media_path = None
+                            if post.is_video:
+                                media_path = os.path.join(DOWNLOADS_DIR, f"{post.date_utc.strftime('%Y-%m-%d_%H-%M-%S')}_UTC.mp4")
                                 
-                                if result and 'track' in result:
-                                    track = result['track']
-                                    music_info = {
-                                        'title': track.get('title', 'Noma\'lum'),
-                                        'artist': track.get('subtitle', 'Noma\'lum'),
-                                        'url': track.get('share', {}).get('href', '')
-                                    }
-                            
-                            # Audio faylni o'chirish
-                            os.remove(audio_path)
-                            
-                    except Exception as e:
-                        logger.error(f"Musiqani aniqlashda xato: {str(e)}")
+                                if os.path.exists(media_path):
+                                    # Fayl hajmini tekshirish
+                                    if os.path.getsize(media_path) > 50 * 1024 * 1024:
+                                        os.remove(media_path)
+                                        await status_message.edit_text(f"❌ {media_type} hajmi juda katta (50MB dan oshiq).")
+                                        return
+                                    
+                                    # Caption tayyorlash
+                                    caption = f"📱 Instagram {media_type}\n"
+                                    if post.caption:
+                                        caption += f"📝 {post.caption[:500]}...\n" if len(post.caption) > 500 else f"📝 {post.caption}\n"
+                                    caption += f"👤 @{post.owner_username}\n"
+                                    
+                                    # Musiqani aniqlash
+                                    try:
+                                        await status_message.edit_text("🎵 Videodagi musiqa aniqlanmoqda...")
+                                        music_info = await extract_and_identify_music(media_path)
+                                        if music_info:
+                                            caption += (
+                                                f"\n🎵 Aniqlangan musiqa:\n"
+                                                f"📌 Nomi: {music_info['title']}\n"
+                                                f"👤 Ijrochi: {music_info['artist']}\n"
+                                            )
+                                            if music_info.get('url'):
+                                                caption += f"🔗 Musiqa havolasi: {music_info['url']}"
+                                    except Exception as e:
+                                        logger.error(f"Musiqani aniqlashda xato: {str(e)}")
+                                    
+                                    # Videoni yuborish
+                                    await status_message.edit_text(f"📤 {media_type} yuborilmoqda...")
+                                    async with aiofiles.open(media_path, 'rb') as f:
+                                        await message.reply_video(
+                                            video=await f.read(),
+                                            caption=caption,
+                                            supports_streaming=True
+                                        )
+                            else:
+                                media_path = os.path.join(DOWNLOADS_DIR, f"{post.date_utc.strftime('%Y-%m-%d_%H-%M-%S')}_UTC.jpg")
+                                if os.path.exists(media_path):
+                                    caption = f"📱 Instagram {media_type}\n"
+                                    if post.caption:
+                                        caption += f"📝 {post.caption[:500]}...\n" if len(post.caption) > 500 else f"📝 {post.caption}\n"
+                                    caption += f"👤 @{post.owner_username}"
+                                    
+                                    async with aiofiles.open(media_path, 'rb') as f:
+                                        await message.reply_photo(
+                                            photo=await f.read(),
+                                            caption=caption
+                                        )
+                                        
+                        except Exception as e:
+                            logger.error(f"{media_type} yuklashda xato: {str(e)}")
+                            await status_message.edit_text(
+                                f"❌ {media_type} yuklab olishda xatolik.\n"
+                                f"{media_type} mavjud emas yoki yopiq profilda."
+                            )
+                            return
 
-                    # Caption tayyorlash
-                    caption = f"📱 Instagram video\n"
-                    if post.caption:
-                        caption += f"📝 {post.caption[:500]}...\n" if len(post.caption) > 500 else f"📝 {post.caption}\n"
-                    
-                    if music_info:
-                        caption += (
-                            f"\n🎵 Aniqlangan musiqa:\n"
-                            f"📌 Nomi: {music_info['title']}\n"
-                            f"👤 Ijrochi: {music_info['artist']}\n"
+                    else:
+                        await status_message.edit_text(
+                            "❌ Noto'g'ri Instagram URL.\n"
+                            "Quyidagi formatlar qo'llab-quvvatlanadi:\n"
+                            "- https://www.instagram.com/stories/username/ID\n"
+                            "- https://www.instagram.com/p/XXXXX\n"
+                            "- https://www.instagram.com/reel/XXXXX"
                         )
-                        if music_info.get('url'):
-                            caption += f"🔗 Musiqa havolasi: {music_info['url']}\n"
+                        return
 
-                    # Videoni yuborish
-                    await status_message.edit_text("📤 Video yuborilmoqda...")
-                    async with aiofiles.open(video_path, 'rb') as f:
-                        await message.reply_video(
-                            video=await f.read(),
-                            caption=caption,
-                            supports_streaming=True
-                        )
-                    
-                    await status_message.delete()
-
-                except instaloader.exceptions.InstaloaderException as e:
-                    logger.error(f"Instagram yuklab olishda xato: {str(e)}")
+                except instaloader.exceptions.LoginRequiredException:
+                    logger.error("Instagram login required")
+                    if session_file.exists():
+                        session_file.unlink()
                     await status_message.edit_text(
-                        "❌ Video yuklab olishda xatolik yuz berdi.\n"
-                        "Sabablari:\n"
-                        "1. Video mavjud emas\n"
-                        "2. Post yopiq profilda\n"
-                        "3. Video o'chirilgan\n"
-                        "Iltimos, boshqa video tanlang."
+                        "⚠️ Instagram tizimiga qayta kirish kerak.\n"
+                        "Iltimos, bir necha daqiqadan so'ng qayta urinib ko'ring."
+                    )
+                    return
+                
+                except Exception as e:
+                    logger.error(f"Instagram session error: {str(e)}")
+                    if session_file.exists():
+                        session_file.unlink()
+                    await status_message.edit_text(
+                        "❌ Instagram tizimiga kirishda xatolik.\n"
+                        "Iltimos, qayta urinib ko'ring."
                     )
                     return
 
             except Exception as e:
                 logger.error(f"Instagram xato: {str(e)}")
                 await status_message.edit_text(
-                    "❌ Instagram video yuklab olishda xatolik yuz berdi.\n"
+                    "❌ Instagram media yuklab olishda xatolik yuz berdi.\n"
                     "Iltimos, qaytadan urinib ko'ring."
                 )
                 return
@@ -1866,7 +2065,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "❌ Noto'g'ri format!\n\n"
                 "Quyidagilarni yuborishingiz mumkin:\n"
                 "1. YouTube video linki\n"
-                "2. Instagram video/reel linki"
+                "2. Instagram story/post/reel linki"
             )
 
     except Exception as e:
@@ -1877,6 +2076,13 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await message.reply_text("❌ Xatolik yuz berdi")
 
     finally:
+        # YouTube video uchun status xabarni o'chirmaslik
+        if status_message and not ("youtube.com" in text.lower() or "youtu.be" in text.lower()):
+            try:
+                await status_message.delete()
+            except Exception as e:
+                logger.error(f"Status xabarni o'chirishda xato: {str(e)}")
+        
         # Vaqtinchalik fayllarni tozalash
         try:
             for file in os.listdir(DOWNLOADS_DIR):
@@ -1889,37 +2095,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             logger.error(f"Fayllarni tozalashda xato: {str(e)}")
 
-async def get_youtube_qualities(url: str) -> List[Dict]:
-    """YouTube video sifatlarini olish"""
-    try:
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = []
-            
-            for f in info['formats']:
-                if f.get('ext') == 'mp4' and f.get('filesize'):
-                    format_name = f"{f.get('height', '')}p"
-                    if f.get('filesize'):
-                        size_mb = round(f['filesize'] / (1024 * 1024), 1)
-                        if size_mb <= 50:  # Faqat 50MB dan kichik formatlarni ko'rsatish
-                            formats.append({
-                                'format': format_name,
-                                'format_id': f['format_id'],
-                                'filesize': f"{size_mb}MB"
-                            })
-            
-            return sorted(formats, key=lambda x: int(x['format'].replace('p', '')), reverse=True)
-            
-    except Exception as e:
-        logger.error(f"YouTube sifatlarni olishda xato: {str(e)}")
-        return None
+
 async def youtube_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """YouTube video yuklab olish"""
     query = update.callback_query
@@ -3076,6 +3252,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_download, pattern="^cancel_download$"))
     app.add_handler(CallbackQueryHandler(find_song_callback, pattern="^find_song_"))
     app.add_handler(CallbackQueryHandler(quality_callback, pattern="^quality_"))
+    app.add_handler(CallbackQueryHandler(quality_callback))
     app.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"))
     app.add_handler(CallbackQueryHandler(delete_channel_callback, pattern="^del_"))
     app.add_handler(CallbackQueryHandler(channel_callback, pattern="^(remove_channel_|admin_back)"))

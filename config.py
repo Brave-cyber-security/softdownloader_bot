@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -12,8 +13,6 @@ class Config:
     ADMIN_IDS = [int(os.getenv('ADMIN_ID', 0))]
     ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
     ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
-    INSTAGRAM_USERNAME = os.getenv('INSTAGRAM_USERNAME')
-    INSTAGRAM_PASSWORD = os.getenv('INSTAGRAM_PASSWORD')
     # Admin panel sozlamalari
     ADMIN_ENABLED = os.getenv('ADMIN_ENABLED', 'true').lower() == 'true'
     ADMIN_COMMAND = os.getenv('ADMIN_COMMAND', 'admin')
@@ -38,6 +37,26 @@ class Config:
     DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
+    
+    # Instagram credentials
+    INSTAGRAM_USERNAME = os.getenv('INSTAGRAM_USERNAME')
+    INSTAGRAM_PASSWORD = os.getenv('INSTAGRAM_PASSWORD')
+
+    # Credentials validatsiyasi
+    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+        raise ValueError("Instagram credentials not found in .env file")
+
+    if len(INSTAGRAM_USERNAME) < 3 or len(INSTAGRAM_PASSWORD) < 6:
+        raise ValueError("Invalid Instagram credentials format")
+
+    # Directories
+    BASE_DIR = Path(__file__).resolve().parent
+    DOWNLOADS_DIR = BASE_DIR / "downloads"
+    SESSIONS_DIR = BASE_DIR / "sessions"
+
+    # Create directories
+    DOWNLOADS_DIR.mkdir(exist_ok=True)
+    SESSIONS_DIR.mkdir(exist_ok=True)
     @classmethod
     def validate(cls):
         """Muhim o'zgaruvchilarni tekshirish"""
