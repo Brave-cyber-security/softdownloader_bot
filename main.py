@@ -1845,9 +1845,9 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     download_comments=False,
                     save_metadata=False,
                     post_metadata_txt_pattern="",
-                    max_connection_attempts=5,
+                    max_connection_attempts=3,
                     request_timeout=30,
-                    fatal_status_codes=[429, 400, 403, 404, 500, 503],
+                    fatal_status_codes=[400, 429, 500, 503],
                     iphone_support=True,
                     user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
                 )
